@@ -2,14 +2,15 @@
 
 ## Architecture
 
-Aplicação React de página única organizada em quatro camadas pequenas:
+Aplicação React de página única com dependências em uma direção: `App` compõe componentes e hook; o hook chama serviços; serviços usam funções puras e contratos. `lib` e `services` não dependem de React, e componentes não acessam a rede diretamente.
 
-1. **Apresentação (`components`)**: formulários, resultados, cartões de clima, previsão, alternância de unidade e estados visuais. Os componentes recebem dados e callbacks por props.
-2. **Orquestração e estado (`hooks`)**: `useWeather` coordena busca, seleção de cidade, consulta meteorológica, unidade e estados de carregamento/erro/vazio.
-3. **Acesso a dados (`services`)**: funções assíncronas encapsulam fetch, parâmetros e validação mínima das respostas Open-Meteo.
-4. **Funções puras e contratos (`lib`, `types`)**: mapeamento de resposta externa, conversão de temperatura, formatação e tipos compartilhados, sem dependência de React ou rede.
+1. **Apresentação (`components`)**: busca, resultados, cartões, previsão, alternância e mensagens de estado. Recebe dados e callbacks via props; não contém fetch nem regras de conversão.
+2. **Orquestração/estado (`hooks`)**: `useWeather` coordena termo, resultados, cidade selecionada, consultas, unidade e estados `idle/loading/success/error/empty`; entrega à UI um estado coerente e ações.
+3. **Acesso a dados (`services`)**: funções assíncronas encapsulam URLs, parâmetros, `fetch`, validação da resposta e mapeamento para os contratos internos. Não conhecem componentes nem renderização.
+4. **Funções puras (`lib`)**: conversão de temperatura, descrição de códigos WMO, formatação e transformação determinística dos dados; sem efeitos de rede ou estado.
+5. **Contratos (`types`)**: tipos compartilhados para cidade, clima, previsão, unidade e estado de erro, sem implementação de comportamento.
 
-O estado fica no hook usado por `App`; não há necessidade atual de Redux, Context ou cache global. Essa separação permite testar apresentação com dados controlados, serviços com `fetch` mockado e regras meteorológicas sem DOM ou rede.
+O estado fica no hook usado por `App`; não há necessidade atual de Redux, Context ou cache global. A separação facilita testes isolados: componentes recebem fixtures e callbacks simulados; o hook exercita transições com serviços substituídos; services usam `fetch` mockado; funções de `lib` são testadas diretamente como entradas e saídas puras. Isso reduz setup e torna falhas mais localizáveis.
 
 ## Tech Stack
 
@@ -54,14 +55,14 @@ tests/
 └── e2e/weather.spec.ts
 ```
 
-- `components/`: um componente por arquivo, sem chamadas diretas à API.
-- `hooks/`: coordena estados e chama serviços; fornece dados normalizados à UI.
-- `services/`: monta URLs, executa `fetch`, trata respostas HTTP/JSON e mapeia dados externos para contratos internos.
-- `lib/`: funções puras para conversão, descrição de códigos WMO e formatação.
-- `types/`: contratos compartilhados entre hook, serviços e componentes.
-- `tests/`: testes Vitest e Playwright, seguindo as configurações já existentes.
+- `components/`: um componente por arquivo, conforme a convenção do projeto; apenas apresentação e callbacks.
+- `hooks/`: estado/orquestração no limite entre `App`, componentes e serviços.
+- `services/`: integração Open-Meteo, sem estado React.
+- `lib/`: lógica determinística reutilizável e testável sem DOM/rede.
+- `types/`: contratos que impedem divergência entre serviços, hooks e componentes.
+- `tests/`: testes Vitest por camada e E2E Playwright, seguindo as configurações existentes.
 
-Essa estrutura mantém dependências em uma direção previsível e torna regras/testes independentes dos componentes visuais.
+Essa estrutura mantém componentes pequenos, serviços substituíveis em testes e regras puras independentes da interface, sem introduzir camadas ou bibliotecas além do necessário.
 
 ## Data Model
 
@@ -85,6 +86,7 @@ export interface CurrentWeather {
   observedAt: string; // Horário local da observação informado pela API.
   temperatureC: number | null; // Temperatura atual em graus Celsius.
   apparentTemperatureC: number | null; // Sensação térmica em graus Celsius.
+  isDay: boolean | null; // Indica dia (true) ou noite (false), a partir de is_day.
   relativeHumidityPercent: number | null; // Umidade relativa em percentual.
   precipitationMm: number | null; // Precipitação atual em milímetros.
   weatherCode: number | null; // Código WMO da condição meteorológica.
@@ -190,6 +192,7 @@ https://api.open-meteo.com/v1/forecast?latitude=38.71667&longitude=-9.13333&curr
     "temperature_2m": 18.4,
     "relative_humidity_2m": 67,
     "apparent_temperature": 18.1,
+    "is_day": 1,
     "precipitation": 0,
     "weather_code": 2,
     "wind_speed_10m": 11.2,
@@ -209,27 +212,32 @@ https://api.open-meteo.com/v1/forecast?latitude=38.71667&longitude=-9.13333&curr
 }
 ```
 
-- **Mapeamento:** `current.time` e os valores `current.*` mapeiam para `CurrentWeather`; cada índice comum dos arrays `daily.*` forma um `ForecastDay`. `timezone` da resposta mapeia para `WeatherData.timezone` e pode ser usado para exibir a hora local; não mutar a `City` retornada pelo geocoding. Validar que os arrays tenham comprimentos compatíveis e mapear valores ausentes para `null`. As unidades recebidas devem ser verificadas contra os sufixos do contrato.
+- **Mapeamento para `City`:** `id`, `name`, `country`, `country_code`, `admin1`, `latitude`, `longitude` e `timezone` de cada resultado mapeiam para os campos homônimos do contrato (`admin1` → `region`). Campos geográficos opcionais viram `null`. `results` ausente ou vazio vira lista vazia e estado `empty`.
+- **Mapeamento para `CurrentWeather`:** `current.time` → `observedAt`; `temperature_2m` → `temperatureC`; `apparent_temperature` → `apparentTemperatureC`; `is_day` (0/1) → `isDay` (false/true); `relative_humidity_2m` → `relativeHumidityPercent`; `precipitation` → `precipitationMm`; `weather_code` → `weatherCode`; `wind_speed_10m` → `windSpeedKmh`; `wind_direction_10m` → `windDirectionDegrees`; `pressure_msl` → `pressureHpa`.
+- **Mapeamento para `ForecastDay`:** para cada índice `i`, `daily.time[i]` → `date`; `weather_code[i]` → `weatherCode`; `temperature_2m_min[i]`/`temperature_2m_max[i]` → temperaturas mínima/máxima; `precipitation_sum[i]` → `precipitationMm`; `precipitation_probability_max[i]` → `precipitationProbabilityPercent`; `wind_speed_10m_max[i]` → `maximumWindSpeedKmh`.
+- **Agregação:** a `City` selecionada, o `current` normalizado, os dias normalizados, `timezone` da resposta Forecast e o horário ISO do cliente em `fetchedAt` formam `WeatherData`. `Unit` é estado de apresentação e não vem da API.
+- Validar que `current` exista e que os arrays `daily.*` tenham comprimentos compatíveis. Valores ausentes opcionais viram `null`; resposta estruturalmente inválida é erro, não `empty`. Verificar as unidades recebidas contra os sufixos do contrato.
 - **Nota de alinhamento:** `daily`, `timezone=auto`, variáveis e `forecast_days=5` são a proposta deste plano para cumprir o desafio e o período de cinco dias. A spec ainda deixa granularidade, campos e fuso/data como perguntas abertas; aprovar essa proposta exige resolver essas perguntas no produto.
 
 ## State Management
 
-- `useWeather` vive no componente raiz `App`; os componentes filhos recebem estado e ações via props.
-- Manter separados `searchStatus` e `weatherStatus`, cada um com `idle | loading | success | error | empty`, para que erro da busca não se confunda com erro do forecast.
-- `idle`: nenhum termo submetido ou nenhuma cidade selecionada; `loading`: request em andamento; `success`: resultados ou dados carregados; `empty`: geocoding sem resultados; `error`: falha de rede/API, timeout ou resposta inválida.
-- O hook mantém em memória o termo, resultados, cidade selecionada, `WeatherData`, `Unit` e erros por operação. Unidade inicia em `celsius`; sem autenticação ou persistência no servidor.
-- Dados de temperatura são armazenados apenas em Celsius. Na renderização, a UI deriva Fahrenheit pela fórmula $F = C \times 9/5 + 32$ quando `unit === 'fahrenheit'`; ao voltar para Celsius, exibe o valor original. Alterar a unidade não chama a API.
-- Política de persistência local da unidade permanece em aberto na spec; por enquanto, a decisão conservadora é estado em memória, sem `localStorage`.
+- O hook local `useWeather`, montado por `App`, é a única fonte de estado da tela; componentes recebem estado e ações via props. Não adicionar estado global enquanto a aplicação tiver este único fluxo principal.
+- Manter dois estados assíncronos independentes, `searchStatus` e `weatherStatus`, ambos com o contrato `idle | loading | success | error | empty`. Isso permite que a busca e o forecast exibam status distintos sem uma máquina global adicional.
+- **`idle`:** a operação ainda não começou. **`loading`:** request em andamento. **`success`:** operação concluída com dados válidos; resposta parcial utilizável também fica em `success`. **`empty`:** exclusiva da busca quando geocoding retorna zero cidades. **`error`:** request falhou, expirou ou retornou estrutura inválida.
+- `useWeather` mantém em memória termo e resultados da busca, cidade selecionada, `WeatherData`, `Unit` e erro associado à operação. A unidade começa em `celsius`; não há persistência no servidor.
+- Dados meteorológicos permanecem em Celsius. Um helper puro deriva valores para exibição durante a renderização: para número `C`, Fahrenheit é $F = C \times 9/5 + 32$; `null` continua indisponível. Min/max atuais e previstos usam o mesmo helper. A troca de unidade não chama geocoding nem forecast.
+- Preferência local entre visitas permanece indefinida na spec; até decisão, mantê-la somente em memória, sem `localStorage`.
 
 ## Error Handling
 
-- **Rede:** serviço captura falha de fetch e retorna erro tipado para a operação atual; UI mantém a cidade/termo e oferece mensagem clara.
-- **HTTP/API:** verificar `response.ok`; tratar HTTP não-2xx e JSON inválido como `error`, nunca como busca vazia.
-- **Timeout:** usar `AbortController` com timeout por request. A duração exata fica pendente da decisão na spec; cancelamentos por troca de cidade não devem aparecer como falha ao usuário.
-- **Resposta parcial:** validar `current` e arrays diários; campos meteorológicos opcionais viram `null`, UI marca apenas esses campos/dias como indisponíveis. Resposta estruturalmente inválida ou sem a cidade/datas necessárias é `error`.
-- **Vazio:** lista de geocoding vazia gera `empty` com opção de editar o termo; não disparar forecast antes de seleção válida.
-- **Respostas fora de ordem:** cancelar a consulta anterior ou ignorar sua resposta quando a cidade selecionada já mudou, evitando sobrescrever dados mais recentes.
-- **Nova tentativa:** preferir retry manual acionado pela UI como comportamento simples inicial; quantidade e política automática precisam de decisão de produto. Não adicionar retries automáticos sem aprovação, para evitar carga e espera ocultas.
+- Serviços normalizam falhas em categorias `network`, `http`, `timeout` e `invalid-response`; a camada de UI converte essas categorias em mensagens pt-BR sem expor detalhes técnicos.
+- **Rede:** erro de `fetch` define `error` somente para a operação que falhou; manter termo e cidade selecionada para possibilitar nova tentativa.
+- **API/HTTP:** verificar `response.ok`; HTTP não-2xx, erro informado pela API e JSON inválido são `error`, nunca `empty`. Não exibir corpo bruto da resposta à pessoa usuária.
+- **Timeout:** `AbortController` cancela requests que excedem o limite. O valor exato permanece pendente na spec. Cancelamento intencional por nova busca/seleção não deve ser comunicado como erro.
+- **Resposta parcial:** campos meteorológicos opcionais ausentes viram `null`; apresentar os demais campos e indicar a indisponibilidade no campo/dia afetado. Se faltar a estrutura necessária para identificar a cidade, o objeto `current` ou as datas da previsão, tratar como `invalid-response` e `error`.
+- **Vazio:** apenas uma resposta de geocoding válida sem cidades define `searchStatus = 'empty'`; não chamar forecast sem seleção. Forecast sem dias utilizáveis é `invalid-response`, não busca vazia.
+- **Respostas fora de ordem:** cancelar ou ignorar resultado de request iniciado para termo/cidade anterior para que não sobrescreva a seleção atual.
+- **Nova tentativa:** oferecer ação manual explícita para repetir a operação que falhou. Retry automático e número de tentativas ficam fora da decisão inicial até produto definir a política.
 
 ## Testing Strategy
 
